@@ -27,3 +27,11 @@ Performance data currently embedded in the dashboard is dated 8 Jun 2026.
 Management charges were checked against L&G factsheet tables on 3 Jun 2026.
 
 This dashboard is for tracking and comparison only. It is not financial advice.
+
+## Updating
+
+Performance data is refreshed weekly by GitHub Actions.
+
+The workflow can also be run manually from:
+
+`Actions` -> `Update dashboard data` -> `Run workflow`
