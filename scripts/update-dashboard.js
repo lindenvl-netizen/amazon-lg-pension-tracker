@@ -194,9 +194,10 @@ function embedPerformance(series) {
   const updated = dashboard.replace(performanceBlockRe, replacement);
 
   const latestAsAt = compact.map((item) => item.asAt).sort().at(-1);
+  const checkedAt = new Date().toISOString().slice(0, 10);
   dashboard = updated.replace(
-    /Performance data: [^|<]+ \| Charges checked:/,
-    `Performance data: ${formatAsDisplayDate(latestAsAt)} | Charges checked:`
+    /(Last checked: [^|<]+ \| Latest L(?:&amp;|&)G performance: [^|<]+ \| Charges checked:|Performance data: [^|<]+ \| Charges checked:)/,
+    `Last checked: ${formatAsDisplayDate(checkedAt)} | Latest L&amp;G performance: ${formatAsDisplayDate(latestAsAt)} | Charges checked:`
   );
   fs.writeFileSync(DASHBOARD, dashboard);
 }
