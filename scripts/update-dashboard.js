@@ -69,6 +69,12 @@ function extractFunds(html) {
   }));
 }
 
+function extractExistingPerformanceSeries(html) {
+  const block = html.match(/const monthlyPerformanceSeries = ([\s\S]*?);\s*const historicalReturns = new Map/);
+  if (!block) return [];
+  return JSON.parse(block[1]);
+}
+
 function buildCatalog(seedHtml) {
   const catalog = [];
   const itemRe = /<a\b[^>]*class="[^"]*\bFundSelectorItem\b[^"]*"[^>]*>[\s\S]*?<\/a>/g;
@@ -205,30 +211,41 @@ function embedPerformance(series) {
 async function main() {
   const dashboard = fs.readFileSync(DASHBOARD, "utf8");
   const funds = extractFunds(dashboard);
+  const previousSeries = new Map(extractExistingPerformanceSeries(dashboard).map((item) => [item.name, item]));
   const seed = await fetchText(SEED_URL);
   const catalog = buildCatalog(seed);
   const series = [];
   const skipped = [];
 
+  function skipOrPreserve(fund, reason) {
+    const existing = previousSeries.get(fund.name);
+    if (existing) {
+      series.push(existing);
+      skipped.push({ name: fund.name, reason: `${reason}; preserved existing series as at ${existing.asAt}` });
+      writeResult(series, skipped);
+      console.log(`keep: ${fund.name} (${reason}; preserved existing series as at ${existing.asAt})`);
+      return;
+    }
+    skipped.push({ name: fund.name, reason });
+  }
+
   for (const fund of funds) {
     if (forcedSkips.has(fund.name)) {
-      skipped.push({ name: fund.name, reason: "Skipped because the source page repeatedly stalled during refresh" });
-      writeResult(series, skipped);
+      skipOrPreserve(fund, "Skipped because the source page repeatedly stalled during refresh");
       continue;
     }
     if (/Lifestyle/.test(fund.name)) {
-      skipped.push({ name: fund.name, reason: "Lifestyle profile; no single shareclass curve" });
+      skipOrPreserve(fund, "Lifestyle profile; no single shareclass curve");
       continue;
     }
     if (/Target Date|Lifetime Advantage/.test(fund.name)) {
-      skipped.push({ name: fund.name, reason: "L&G chart API returns no valid monthly periods for this range" });
-      writeResult(series, skipped);
+      skipOrPreserve(fund, "L&G chart API returns no valid monthly periods for this range");
       continue;
     }
 
     const entry = chooseCatalogEntry(fund, catalog);
     if (!entry) {
-      skipped.push({ name: fund.name, reason: "No matching Fund Centre page in catalog" });
+      skipOrPreserve(fund, "No matching Fund Centre page in catalog");
       continue;
     }
 
@@ -238,7 +255,7 @@ async function main() {
       const partId = getPerformancePartId(page);
       const shareclassId = chooseShareclassId(page, fund.name);
       if (!partId || !shareclassId) {
-        skipped.push({ name: fund.name, reason: "Missing performance part or shareclass id" });
+        skipOrPreserve(fund, "Missing performance part or shareclass id");
         continue;
       }
 
@@ -246,7 +263,7 @@ async function main() {
       const data = await fetchJson(api);
       const plot = data.share_class_plots && data.share_class_plots[0];
       if (!plot || !plot.data || plot.data.length < 2) {
-        skipped.push({ name: fund.name, reason: "No chart data returned" });
+        skipOrPreserve(fund, "No chart data returned");
         continue;
       }
 
@@ -265,9 +282,7 @@ async function main() {
       writeResult(series, skipped);
       console.log(`ok ${series.length}: ${fund.name}`);
     } catch (error) {
-      skipped.push({ name: fund.name, reason: error.message });
-      writeResult(series, skipped);
-      console.log(`skip: ${fund.name} (${error.message})`);
+      skipOrPreserve(fund, error.message);
     }
   }
 
