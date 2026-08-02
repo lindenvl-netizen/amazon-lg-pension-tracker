@@ -450,6 +450,27 @@
       stroke-width: 1;
     }
 
+    .chart-hover-line {
+      stroke: #064f70;
+      stroke-dasharray: 4 4;
+      stroke-width: 1.2;
+      opacity: 0.55;
+      pointer-events: none;
+    }
+
+    .chart-hover-label-bg {
+      fill: #064f70;
+      opacity: 0.92;
+      pointer-events: none;
+    }
+
+    .chart-hover-label {
+      fill: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      pointer-events: none;
+    }
+
     .chart-label {
       fill: var(--muted);
       font-size: 11px;
@@ -479,7 +500,7 @@
     }
 
     .chart-tooltip {
-      position: absolute;
+      position: fixed;
       z-index: 5;
       max-width: min(320px, calc(100% - 24px));
       padding: 8px 10px;
@@ -491,7 +512,6 @@
       font-size: 12px;
       line-height: 1.35;
       pointer-events: none;
-      transform: translate(12px, -50%);
       opacity: 0;
       transition: opacity 120ms ease;
     }
@@ -514,6 +534,7 @@
     .chart-point {
       stroke: #fff;
       stroke-width: 1.5;
+      pointer-events: none;
     }
 
     .chart-empty {
@@ -808,8 +829,7 @@
           </div>
         </div>
         <div class="chart-wrap">
-          <svg id="returnsChart" class="chart-svg" role="img" aria-labelledby="chartTitle chartDesc">
-            <title id="chartTitle">Historical fund returns</title>
+          <svg id="returnsChart" class="chart-svg" role="img" aria-label="Historical fund returns" aria-describedby="chartDesc">
             <desc id="chartDesc">Line chart of month-end performance rebased to the selected start month.</desc>
           </svg>
           <div id="chartTooltip" class="chart-tooltip" role="status" aria-live="polite"></div>
@@ -5969,6 +5989,9 @@
     const selectedSeriesNames = new Set(fundsWithMonthlyData.slice(0, 2).map((fund) => fund.name));
     const allocationWeights = new Map();
     let currentSimulatorSeries = [];
+    let currentChartPointSets = [];
+    let currentChartDates = [];
+    let currentChartPlotBounds = null;
     let lastAllocationSignature = "";
 
     function populateTypeFilter() {
@@ -6113,48 +6136,112 @@
 
     function hideChartTooltip() {
       chartTooltip.classList.remove("is-visible");
+      const hoverLine = returnsChart.querySelector("#chartHoverLine");
+      if (hoverLine) hoverLine.setAttribute("visibility", "hidden");
+      const hoverDate = returnsChart.querySelector("#chartHoverDate");
+      if (hoverDate) hoverDate.setAttribute("visibility", "hidden");
     }
 
-    function positionChartTooltip(event, point, color, name) {
-      const pointer = event.touches ? event.touches[0] : event;
-      const wrapRect = chartTooltip.parentElement.getBoundingClientRect();
-      const x = pointer.clientX - wrapRect.left + chartTooltip.parentElement.scrollLeft;
-      const y = pointer.clientY - wrapRect.top + chartTooltip.parentElement.scrollTop;
-      const maxLeft = Math.max(8, chartTooltip.parentElement.scrollWidth - 260);
-      const left = Math.min(Math.max(8, x + 12), maxLeft);
-      const top = Math.min(Math.max(22, y), chartTooltip.parentElement.scrollHeight - 28);
-      chartTooltip.style.left = `${left}px`;
-      chartTooltip.style.top = `${top}px`;
+    function clientPointToSvg(pointer) {
+      const matrix = returnsChart.getScreenCTM();
+      if (!matrix) return null;
+      const svgPoint = returnsChart.createSVGPoint();
+      svgPoint.x = pointer.clientX;
+      svgPoint.y = pointer.clientY;
+      return svgPoint.matrixTransform(matrix.inverse());
+    }
+
+    function positionChartTooltip(point, color, name, date) {
+      const viewBox = returnsChart.viewBox.baseVal;
+      const svgRect = returnsChart.getBoundingClientRect();
+      const anchorX = svgRect.left + ((point.x - viewBox.x) / viewBox.width) * svgRect.width;
+      const anchorY = svgRect.top + ((point.y - viewBox.y) / viewBox.height) * svgRect.height;
       chartTooltip.innerHTML = `
         <strong><span class="legend-swatch" style="background:${color}"></span>${escapeAttr(name)}</strong>
-        <span>${point.date} | ${formatPct(point.value)} from selected start | raw ${formatPct(point.rawValue)}</span>
+        <span>${date} | ${formatPct(point.value)} from selected start | raw ${formatPct(point.rawValue)}</span>
       `;
       chartTooltip.classList.add("is-visible");
+
+      const tooltipWidth = chartTooltip.offsetWidth || 260;
+      const tooltipHeight = chartTooltip.offsetHeight || 48;
+      const left = Math.min(Math.max(8, anchorX + 12), window.innerWidth - tooltipWidth - 8);
+      const top = Math.min(Math.max(8, anchorY - tooltipHeight / 2), window.innerHeight - tooltipHeight - 8);
+      chartTooltip.style.left = `${left}px`;
+      chartTooltip.style.top = `${top}px`;
     }
 
     function showChartTooltip(event) {
-      const path = event.target.closest("[data-chart-points]");
-      if (!path) {
+      if (!currentChartPointSets.length) {
         hideChartTooltip();
         return;
       }
 
       const pointer = event.touches ? event.touches[0] : event;
-      const points = JSON.parse(path.getAttribute("data-chart-points"));
-      const svgRect = returnsChart.getBoundingClientRect();
-      const viewBox = returnsChart.viewBox.baseVal;
-      const svgX = ((pointer.clientX - svgRect.left) / svgRect.width) * viewBox.width;
-      const nearest = points.reduce((best, point) => {
-        const distance = Math.abs(point.x - svgX);
-        return !best || distance < best.distance ? { point, distance } : best;
+      const svgPoint = clientPointToSvg(pointer);
+      if (!svgPoint) {
+        hideChartTooltip();
+        return;
+      }
+      const svgX = svgPoint.x;
+      const svgY = svgPoint.y;
+      const plotBounds = currentChartPlotBounds;
+      if (!plotBounds) {
+        hideChartTooltip();
+        return;
+      }
+      if (
+        svgX < plotBounds.left - 16 ||
+        svgX > plotBounds.right + 16 ||
+        svgY < plotBounds.top - 24 ||
+        svgY > plotBounds.bottom + 24
+      ) {
+        hideChartTooltip();
+        return;
+      }
+
+      const nearestDate = currentChartDates.reduce((best, date) => {
+        const distance = Math.abs(date.x - svgX);
+        return !best || distance < best.distance ? { ...date, distance } : best;
       }, null);
+      if (!nearestDate) return;
+
+      const hoverX = Math.min(Math.max(plotBounds.left, svgX), plotBounds.right);
+      const hoverLine = returnsChart.querySelector("#chartHoverLine");
+      if (hoverLine) {
+        hoverLine.setAttribute("x1", hoverX.toFixed(1));
+        hoverLine.setAttribute("x2", hoverX.toFixed(1));
+        hoverLine.setAttribute("visibility", "visible");
+      }
+      const hoverDate = returnsChart.querySelector("#chartHoverDate");
+      if (hoverDate) {
+        const labelWidth = 58;
+        const labelX = Math.min(
+          Math.max(plotBounds.left + labelWidth / 2, hoverX),
+          plotBounds.right - labelWidth / 2
+        );
+        const labelBg = hoverDate.querySelector("rect");
+        const labelText = hoverDate.querySelector("text");
+        labelBg.setAttribute("x", (labelX - labelWidth / 2).toFixed(1));
+        labelText.setAttribute("x", labelX.toFixed(1));
+        labelText.textContent = nearestDate.date;
+        hoverDate.setAttribute("visibility", "visible");
+      }
+
+      const candidatePoints = currentChartPointSets
+        .flatMap((series) => series.points
+          .filter((point) => point.date === nearestDate.date)
+          .map((point) => ({ ...series, point })));
+      if (!candidatePoints.length) {
+        hideChartTooltip();
+        return;
+      }
+      const nearest = candidatePoints
+        .reduce((best, item) => {
+          const distance = Math.abs(item.point.y - svgY);
+          return !best || distance < best.distance ? { ...item, distance } : best;
+        }, null);
       if (!nearest) return;
-      positionChartTooltip(
-        event,
-        nearest.point,
-        path.getAttribute("data-chart-color"),
-        path.getAttribute("data-chart-name")
-      );
+      positionChartTooltip(nearest.point, nearest.color, nearest.name, nearestDate.date);
     }
 
     function rebaseMonthlyPoints(monthly, dateSet) {
@@ -6194,8 +6281,10 @@
       returnsChart.setAttribute("viewBox", `0 0 ${width} ${height}`);
 
       if (!series.length || !allDates.length || !allValues.length) {
+        currentChartPointSets = [];
+        currentChartDates = [];
+        currentChartPlotBounds = null;
         returnsChart.innerHTML = `
-          <title id="chartTitle">Historical fund returns</title>
           <desc id="chartDesc">No matched monthly performance series for the current filter.</desc>
           <text class="chart-empty" x="${width / 2}" y="${height / 2}" text-anchor="middle">Select one or more loaded funds to compare</text>
         `;
@@ -6209,6 +6298,13 @@
       const yMax = ticks[ticks.length - 1];
       const x = (index) => margin.left + (plotWidth * index) / Math.max(1, allDates.length - 1);
       const y = (value) => margin.top + plotHeight - ((value - yMin) / (yMax - yMin)) * plotHeight;
+      currentChartPlotBounds = {
+        left: margin.left,
+        right: width - margin.right,
+        top: margin.top,
+        bottom: height - margin.bottom
+      };
+      currentChartDates = allDates.map((date, index) => ({ date, x: x(index) }));
 
       const horizontalGrid = ticks.map((tick) => `
         <line class="chart-grid" x1="${margin.left}" y1="${y(tick).toFixed(1)}" x2="${width - margin.right}" y2="${y(tick).toFixed(1)}"></line>
@@ -6226,6 +6322,8 @@
       `;
       }).join("");
 
+      currentChartPointSets = [];
+
       const paths = chartSeries.map(({ fund, rebased }, fundIndex) => {
         const color = chartColors[fundIndex % chartColors.length];
         const points = rebased
@@ -6234,6 +6332,9 @@
             return { x: x(index), y: y(point.value), value: point.value, rawValue: point.rawValue, date: point.date };
           })
           .filter((point) => point.x >= margin.left);
+        if (points.length) {
+          currentChartPointSets.push({ name: fund.name, color, points });
+        }
 
         const lineMarkup = points.length > 1
           ? `
@@ -6244,19 +6345,21 @@
         const pointMarkup = points.map((point, pointIndex) => {
           const showPoint = pointIndex === 0 || pointIndex === points.length - 1 || pointIndex % 6 === 0;
           return showPoint ? `
-            <circle class="chart-point" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3.2" fill="${color}">
-              <title>${fund.name}: ${point.date} ${formatPct(point.value)} from selected start</title>
-            </circle>
+            <circle class="chart-point" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3.2" fill="${color}"></circle>
           ` : "";
         }).join("");
         return `${lineMarkup}${pointMarkup}`;
       }).join("");
 
       returnsChart.innerHTML = `
-        <title id="chartTitle">Historical fund returns</title>
         <desc id="chartDesc">Line chart of month-end performance rebased to the selected start month.</desc>
         ${horizontalGrid}
         ${verticalLabels}
+        <line id="chartHoverLine" class="chart-hover-line" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height - margin.bottom}" visibility="hidden"></line>
+        <g id="chartHoverDate" visibility="hidden">
+          <rect class="chart-hover-label-bg" x="${margin.left}" y="${height - 38}" width="58" height="18" rx="4"></rect>
+          <text class="chart-hover-label" x="${margin.left + 29}" y="${height - 25}" text-anchor="middle">-</text>
+        </g>
         <line class="chart-axis" x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}"></line>
         <line class="chart-axis" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height - margin.bottom}"></line>
         ${paths}
